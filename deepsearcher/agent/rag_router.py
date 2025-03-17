@@ -28,6 +28,7 @@ class RAGRouter(RAGAgent):
         self.llm = llm
         self.rag_agents = rag_agents
         self.agent_descriptions = agent_descriptions
+        
         if not self.agent_descriptions:
             try:
                 self.agent_descriptions = [
@@ -53,6 +54,8 @@ class RAGRouter(RAGAgent):
             )
             selected_agent_index = int(self.find_last_digit(chat_response.content)) - 1
 
+        if len(self.rag_agents) == 1:
+            selected_agent_index = 0
         selected_agent = self.rag_agents[selected_agent_index]
         log.color_print(
             f"<think> Select agent [{selected_agent.__class__.__name__}] to answer the query [{query}] </think>\n"

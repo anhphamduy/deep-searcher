@@ -5,9 +5,9 @@ from deepsearcher import configuration
 from deepsearcher.vector_db.base import RetrievalResult
 
 
-def query(original_query: str, max_iter: int = 3) -> Tuple[str, List[RetrievalResult], int]:
+def query(original_query: str, max_iter: int = 3, thinking_callback=None) -> Tuple[str, List[RetrievalResult], int]:
     default_searcher = configuration.default_searcher
-    return default_searcher.query(original_query, max_iter=max_iter)
+    return default_searcher.query(original_query, max_iter=max_iter, thinking_callback=thinking_callback)
 
 
 def retrieve(
