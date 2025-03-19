@@ -10,6 +10,10 @@ from deepsearcher.tools import log
 from deepsearcher.vector_db import RetrievalResult
 from deepsearcher.vector_db.base import BaseVectorDB, deduplicate_results
 
+# -----------------------------------------------------------------------
+# UPDATED PROMPTS: We instruct the AI to include references inline
+# -----------------------------------------------------------------------
+
 SUB_QUERY_PROMPT = """To answer this question more comprehensively, please break down the original question into up to four sub-questions. Return as list of str.
 If this is a very simple question and no decomposition is necessary, then keep the only one original question in the python code list.
 
@@ -31,7 +35,7 @@ Example output:
 Provide your response in a python code list of str format:
 """
 
-RERANK_PROMPT = """Based on the query questions and the retrieved chunk, to determine whether the chunk is helpful in answering any of the query question, you can only return "YES" or "NO" or "MAYBE", without any other information.
+RERANK_PROMPT = """Based on the query questions and the retrieved chunk, determine whether the chunk is helpful in answering any of the query questions. You can only return "YES" or "NO" or "MAYBE", without any other information.
 
 Query Questions: {query}
 Retrieved Chunk: {retrieved_chunk}
@@ -53,7 +57,11 @@ Related Chunks:
 Respond exclusively in valid List of str format without any other text.
 """
 
-SUMMARY_PROMPT = """You are an AI content analysis expert with strong skills in restructuring and refining content for better comprehension. Your task is to rewrite the provided information into a well-structured, coherent, and AI-friendly format while preserving all details, including the smallest details. Avoid over-generalization.
+SUMMARY_PROMPT = """You are an AI content analysis expert with strong skills in restructuring and refining content for better comprehension. Your task is to rewrite the provided information into a well-structured, coherent, and AI-friendly format while preserving all details—include even the smallest details. Avoid over-generalization.
+
+IMPORTANT: Please include inline references exactly as they appear in the provided chunk texts. Each chunk may already contain a line like: 
+[Ref: filename => partial snippet...]
+Make sure to keep those references inline in your summary wherever you use or paraphrase the corresponding content.
 
 Original Query:
 {question}
@@ -61,13 +69,10 @@ Original Query:
 Previous Sub-Queries:
 {mini_questions}
 
-Relevant Document Chunks:
+Relevant Document Chunks (with references injected):
 {mini_chunk_str}
 """
 
-# -----------------------------------------------------------------------
-# UPDATED PROMPTS: We pass the question, sub-queries, and chunk texts too
-# -----------------------------------------------------------------------
 REVIEW_PROMPT = """Analyze the following rewrite critically and identify any issues with correctness, completeness, or clarity.
 We have provided the original query, sub-queries, and relevant chunks for reference.
 Highlight missing details, inaccuracies, overly generalized statements, or any other weaknesses.
@@ -87,6 +92,8 @@ Text to be reviewed:
 
 DETAILED_REWRITE_PROMPT = """Now based on the feedback, rewrite the first rewrite to be more detailed and thorough, incorporating any missing definitions, clarifications, or important details referenced in the question, sub-queries, or chunks. 
 Return the final detailed summary as plain text.
+
+IMPORTANT: Continue to include inline references as they appear in the chunk texts (e.g., [Ref: filename => ...]) for any information taken from those chunks.
 
 Original Query:
 {question}
@@ -136,8 +143,6 @@ class DeepSearch(RAGAgent):
         )
         response_content = chat_response.content
         return self.llm.literal_eval(response_content), chat_response.total_tokens
-
-    
 
     async def _search_chunks_from_vectordb(
         self, query: str, sub_queries: List[str], thinking_callback
@@ -228,14 +233,10 @@ class DeepSearch(RAGAgent):
 
             # Build a friendlier message with just file names as links
             if accepted_count > 0:
-                # Convert each reference path to just the file name and wrap in an example link
-                # You can decide what your actual link scheme should be (local, app-specific, or web-based).
                 link_list = []
                 for ref in references:
                     file_name = os.path.basename(ref)
-                    # Example link format: "[supporting_doc_1.txt](myapp://file/supporting_doc_1.txt)"
                     link_list.append(f"[{file_name}]")
-
                 references_text = ", ".join(link_list)
                 msg = (
                     f"✔️ Found {accepted_count} helpful snippet(s) for \"{query}\" in this source.\n"
@@ -247,7 +248,6 @@ class DeepSearch(RAGAgent):
                 log.color_print("🙁 None of these snippets seemed helpful.\n")
 
         return all_retrieved_results, consume_tokens
-
 
     def _generate_gap_queries(
         self,
@@ -317,7 +317,7 @@ class DeepSearch(RAGAgent):
             for res, consumed_token in search_results:
                 total_tokens += consumed_token
                 search_res_from_vectordb.extend(res)
-
+            
             # Deduplicate
             search_res_from_vectordb = deduplicate_results(search_res_from_vectordb)
             all_search_res.extend(search_res_from_vectordb + search_res_from_internet)
@@ -346,6 +346,7 @@ class DeepSearch(RAGAgent):
         # Final deduplication
         all_search_res = deduplicate_results(all_search_res)
         additional_info = {"all_sub_queries": all_sub_queries}
+        print("len is " + str(len(all_search_res)))
         return all_search_res, total_tokens, additional_info
 
     def query(self, query: str, **kwargs) -> Tuple[str, List[RetrievalResult], int]:
@@ -362,13 +363,23 @@ class DeepSearch(RAGAgent):
             return f"No relevant information found for query '{query}'.", [], n_token_retrieval
 
         all_sub_queries = additional_info["all_sub_queries"]
-        # Decide which text to collect from each chunk
+
+        # Collect chunk texts with references appended inline
         chunk_texts = []
         for chunk in all_retrieved_results:
+            # Insert references inline at the end of each chunk snippet
+            filename = os.path.basename(chunk.reference)
+            snippet_for_ref = chunk.text[:100].replace("\n", " ")
+            if len(chunk.text) > 100:
+                snippet_for_ref += "..."
             if self.text_window_splitter and "wider_text" in chunk.metadata:
-                chunk_texts.append(chunk.metadata["wider_text"])
+                chunk_texts.append(
+                    f"{chunk.metadata['wider_text']}\n[Ref: {filename} => {snippet_for_ref}]"
+                )
             else:
-                chunk_texts.append(chunk.text)
+                chunk_texts.append(
+                    f"{chunk.text}\n[Ref: {filename} => {snippet_for_ref}]"
+                )
 
         # -- 2) Summarize with SUMMARY_PROMPT
         log.color_print(f"<think> Summarizing from {len(all_retrieved_results)} chunks... </think>\n")
@@ -395,7 +406,7 @@ class DeepSearch(RAGAgent):
             [{"role": "user", "content": review_prompt}]
         )
         review = chat_response_review.content
-
+        print(chunks_str)
         # -- 4) Rewrite in detail with DETAILED_REWRITE_PROMPT
         rewrite_prompt = DETAILED_REWRITE_PROMPT.format(
             question=query,
@@ -424,7 +435,7 @@ class DeepSearch(RAGAgent):
         return final_answer, all_retrieved_results, total_tokens
 
     def _format_chunk_texts(self, chunk_texts: List[str]) -> str:
-        """Conveniently format chunk texts for prompts."""
+        """Conveniently format chunk texts (which now contain references inline)."""
         chunk_str = ""
         for i, chunk in enumerate(chunk_texts):
             chunk_str += f"<chunk_{i}>\n{chunk}\n</chunk_{i}>\n"
