@@ -389,50 +389,50 @@ class DeepSearch(RAGAgent):
             mini_questions=all_sub_queries,
             mini_chunk_str=self._format_chunk_texts(chunk_texts),
         )
-        chat_response_summary = self.llm.chat(
-            [{"role": "user", "content": summary_prompt}]
-        )
-        summary_text = chat_response_summary.content
+        # chat_response_summary = self.llm.chat(
+        #     [{"role": "user", "content": summary_prompt}]
+        # )
+        # summary_text = chat_response_summary.content
 
-        # -- 3) Review the summary with REVIEW_PROMPT
-        chunks_str = self._format_chunk_texts(chunk_texts)
-        review_prompt = REVIEW_PROMPT.format(
-            question=query,
-            sub_queries=all_sub_queries,
-            chunks=chunks_str,
-            summarization=summary_text
-        )
-        chat_response_review = self.llm.chat(
-            [{"role": "user", "content": review_prompt}]
-        )
-        review = chat_response_review.content
-        print(chunks_str)
-        # -- 4) Rewrite in detail with DETAILED_REWRITE_PROMPT
-        rewrite_prompt = DETAILED_REWRITE_PROMPT.format(
-            question=query,
-            sub_queries=all_sub_queries,
-            chunks=chunks_str,
-            review=review,
-            text=summary_text,
-        )
-        chat_response_detailed = self.llm.chat(
-            [{"role": "user", "content": rewrite_prompt}]
-        )
-        final_answer = chat_response_detailed.content
+        # # -- 3) Review the summary with REVIEW_PROMPT
+        # chunks_str = self._format_chunk_texts(chunk_texts)
+        # review_prompt = REVIEW_PROMPT.format(
+        #     question=query,
+        #     sub_queries=all_sub_queries,
+        #     chunks=chunks_str,
+        #     summarization=summary_text
+        # )
+        # chat_response_review = self.llm.chat(
+        #     [{"role": "user", "content": review_prompt}]
+        # )
+        # review = chat_response_review.content
+        # print(chunks_str)
+        # # -- 4) Rewrite in detail with DETAILED_REWRITE_PROMPT
+        # rewrite_prompt = DETAILED_REWRITE_PROMPT.format(
+        #     question=query,
+        #     sub_queries=all_sub_queries,
+        #     chunks=chunks_str,
+        #     review=review,
+        #     text=summary_text,
+        # )
+        # chat_response_detailed = self.llm.chat(
+        #     [{"role": "user", "content": rewrite_prompt}]
+        # )
+        # final_answer = chat_response_detailed.content
 
-        # Print final answer to logs
-        log.color_print("\n==== FINAL ANSWER====\n")
-        log.color_print(final_answer)
+        # # Print final answer to logs
+        # log.color_print("\n==== FINAL ANSWER====\n")
+        # log.color_print(final_answer)
 
-        # Tally up total tokens
+        # # Tally up total tokens
         total_tokens = (
             n_token_retrieval
-            + chat_response_summary.total_tokens
-            + chat_response_review.total_tokens
-            + chat_response_detailed.total_tokens
+            # + chat_response_summary.total_tokens
+            # + chat_response_review.total_tokens
+            # + chat_response_detailed.total_tokens
         )
 
-        return final_answer, all_retrieved_results, total_tokens
+        return self._format_chunk_texts(chunk_texts), all_retrieved_results, total_tokens
 
     def _format_chunk_texts(self, chunk_texts: List[str]) -> str:
         """Conveniently format chunk texts (which now contain references inline)."""
