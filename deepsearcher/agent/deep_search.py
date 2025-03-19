@@ -1,5 +1,6 @@
 import asyncio
 from typing import List, Tuple
+import os
 
 from deepsearcher.agent.base import RAGAgent, describe_class
 from deepsearcher.agent.collection_router import CollectionRouter
@@ -136,13 +137,15 @@ class DeepSearch(RAGAgent):
         response_content = chat_response.content
         return self.llm.literal_eval(response_content), chat_response.total_tokens
 
+    
+
     async def _search_chunks_from_vectordb(
         self, query: str, sub_queries: List[str], thinking_callback
     ) -> Tuple[List[RetrievalResult], int]:
         """Search the vector DB for the given query and sub-queries. Return accepted chunks plus token usage."""
         consume_tokens = 0
 
-        # 1) Determine which collections to search in
+        # 1) Determine which sources to search in
         if self.route_collection:
             selected_collections, n_token_route = self.collection_router.invoke(query=query)
         else:
@@ -153,61 +156,98 @@ class DeepSearch(RAGAgent):
         all_retrieved_results = []
         query_vector = self.embedding_model.embed_query(query)
 
-        # 2) Search each collection
-        for collection in selected_collections:
-            log.color_print(f"<search> Searching for [{query}] in [{collection}]... </search>\n")
-            thinking_callback(f"<search> Searching for [{query}] in [{collection}]... </search>\n")
+        # 2) Search each source
+        for source in selected_collections:
+            log.color_print(
+                f"🔎 Looking for useful snippets about \"{query}\"\n"
+            )
+            thinking_callback(
+                f"🔎 Looking for useful snippets about \"{query}\"\n"
+            )
+
             retrieved_results = self.vector_db.search_data(
-                collection=collection,
+                collection=source,
                 vector=query_vector
             )
             if not retrieved_results:
-                log.color_print(
-                    f"<search> No relevant doc chunks found in '{collection}'. </search>\n"
-                )
+                log.color_print(f"😕 No snippets found in {source}.\n")
                 continue
 
-            # 3) Rerank each chunk to confirm helpfulness
-            accepted_chunk_num = 0
+            # 3) Rerank each snippet concurrently
+            tasks_rerank = []
+            for result in retrieved_results:
+                snippet = result.text[:80].replace("\n", " ")
+                if len(result.text) > 80:
+                    snippet += "..."
+
+                async def rerank_snippet(retrieved_result=result, snippet=snippet):
+                    thinking_callback(
+                        f"💭 Considering snippet for \"{query}\":\n→ \"{snippet}\"\n"
+                    )
+                    log.color_print(
+                        f"💭 Checking snippet:\n\"{snippet}\"\n"
+                    )
+
+                    # Ask your LLM whether to keep the snippet
+                    chat_response = self.llm.chat(
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": RERANK_PROMPT.format(
+                                    query=[query] + sub_queries,
+                                    retrieved_chunk=f"<chunk>{retrieved_result.text}</chunk>"
+                                ),
+                            }
+                        ]
+                    )
+                    response_content = chat_response.content.strip()
+
+                    # Remove hidden reasoning if present
+                    if "<think>" in response_content and "</think>" in response_content:
+                        end_of_think = response_content.find("</think>") + len("</think>")
+                        response_content = response_content[end_of_think:].strip()
+
+                    return (retrieved_result, response_content, chat_response.total_tokens)
+
+                tasks_rerank.append(asyncio.create_task(rerank_snippet()))
+
+            # Wait for all re-rank tasks to complete
+            rerank_outcomes = await asyncio.gather(*tasks_rerank)
+
+            # Process the outcomes
+            accepted_count = 0
             references = set()
+            for (retrieved_result, response_content, used_tokens) in rerank_outcomes:
+                consume_tokens += used_tokens
 
-            for retrieved_result in retrieved_results:
-                chat_response = self.llm.chat(
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": RERANK_PROMPT.format(
-                                query=[query] + sub_queries,
-                                retrieved_chunk=f"<chunk>{retrieved_result.text}</chunk>"
-                            ),
-                        }
-                    ]
-                )
-                consume_tokens += chat_response.total_tokens
-                response_content = chat_response.content.strip()
-
-                # Remove hidden reasoning if present
-                if "<think>" in response_content and "</think>" in response_content:
-                    end_of_think = response_content.find("</think>") + len("</think>")
-                    response_content = response_content[end_of_think:].strip()
-
-                # If it says "YES" or "MAYBE", accept the chunk
+                # If it says "YES" or "MAYBE", accept the snippet
                 if ("YES" in response_content or "MAYBE" in response_content) and "NO" not in response_content:
                     all_retrieved_results.append(retrieved_result)
-                    accepted_chunk_num += 1
+                    accepted_count += 1
                     references.add(retrieved_result.reference)
 
-            if accepted_chunk_num > 0:
-                thinking_callback(f"<search> Accepted {accepted_chunk_num} chunk(s) from references: {list(references)} </search>\n")
-                log.color_print(
-                    f"<search> Accepted {accepted_chunk_num} chunk(s) from references: {list(references)} </search>\n"
+            # Build a friendlier message with just file names as links
+            if accepted_count > 0:
+                # Convert each reference path to just the file name and wrap in an example link
+                # You can decide what your actual link scheme should be (local, app-specific, or web-based).
+                link_list = []
+                for ref in references:
+                    file_name = os.path.basename(ref)
+                    # Example link format: "[supporting_doc_1.txt](myapp://file/supporting_doc_1.txt)"
+                    link_list.append(f"[{file_name}]")
+
+                references_text = ", ".join(link_list)
+                msg = (
+                    f"✔️ Found {accepted_count} helpful snippet(s) for \"{query}\" in this source.\n"
+                    f"Relevant files: {references_text}\n"
                 )
+                log.color_print(msg)
+                thinking_callback(msg)
             else:
-                log.color_print(
-                    f"<search> No chunk accepted from '{collection}'. </search>\n"
-                )
+                log.color_print("🙁 None of these snippets seemed helpful.\n")
 
         return all_retrieved_results, consume_tokens
+
 
     def _generate_gap_queries(
         self,
@@ -355,7 +395,6 @@ class DeepSearch(RAGAgent):
             [{"role": "user", "content": review_prompt}]
         )
         review = chat_response_review.content
-        kwargs['thinking_callback'](review)
 
         # -- 4) Rewrite in detail with DETAILED_REWRITE_PROMPT
         rewrite_prompt = DETAILED_REWRITE_PROMPT.format(
