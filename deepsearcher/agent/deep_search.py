@@ -43,7 +43,7 @@ Retrieved Chunk: {retrieved_chunk}
 Is the chunk helpful in answering any of the questions?
 """
 
-REFLECT_PROMPT = """Determine whether additional search queries are needed based on the original query, previous sub queries, and all retrieved document chunks. If further research is required, provide a Python list of up to 3 search queries. If no further research is required, return an empty list. Further search is required when there is a lack of details, or more clarifications or definitions are needed, or if the search results are too generalized.
+REFLECT_PROMPT = """Determine whether additional search queries are needed based on the original query, previous sub queries, and all retrieved document chunks. If further research is required, provide a Python list of up to 4 search queries. If no further research is required, return an empty list. Further search is required when there is a lack of details, or more clarifications or definitions are needed, or if the search results are too generalized.
 
 If the original query is to write a report, then you prefer to generate some further queries, otherwise return an empty list.
 
@@ -266,6 +266,7 @@ class DeepSearch(RAGAgent):
             mini_questions=all_sub_queries,
             mini_chunk_str=mini_chunk_str
         )
+        print(reflect_prompt)
         chat_response = self.llm.chat([{"role": "user", "content": reflect_prompt}])
         response_content = chat_response.content
         return self.llm.literal_eval(response_content), chat_response.total_tokens
