@@ -103,7 +103,7 @@ class Milvus(BaseVectorDB):
         self,
         collection: Optional[str],
         vector: Union[np.array, List[float]],
-        top_k: int = 5,
+        top_k: int = 12,
         *args,
         **kwargs,
     ) -> List[RetrievalResult]:
