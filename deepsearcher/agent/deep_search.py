@@ -67,10 +67,10 @@ Relevant Document Chunks:
 # -----------------------------------------------------------------------
 # UPDATED PROMPTS: We pass the question, sub-queries, and chunk texts too
 # -----------------------------------------------------------------------
-REVIEW_PROMPT = """Review the following rewrite for correctness, completeness, and clarity. 
-We are also including the original query, sub-queries, and relevant chunks. 
-Use them to verify or correct missing details or too generalized details.
-It must be as explicit and detailed as possible.
+REVIEW_PROMPT = """Analyze the following rewrite critically and identify any issues with correctness, completeness, or clarity.
+We have provided the original query, sub-queries, and relevant chunks for reference.
+Highlight missing details, inaccuracies, overly generalized statements, or any other weaknesses.
+Only point out areas that need improvement—do not include positive feedback.
 
 Original Query:
 {question}
@@ -81,11 +81,10 @@ Sub-Queries:
 Chunks:
 {chunks}
 
-Rewrite to review:
-{summarization}
-"""
+Text to be reviewed:
+{summarization}"""
 
-DETAILED_REWRITE_PROMPT = """Now rewrite the first rewrite to be more detailed and thorough, incorporating any missing definitions, clarifications, or important details referenced in the question, sub-queries, or chunks. 
+DETAILED_REWRITE_PROMPT = """Now based on the feedback, rewrite the first rewrite to be more detailed and thorough, incorporating any missing definitions, clarifications, or important details referenced in the question, sub-queries, or chunks. 
 Return the final detailed summary as plain text.
 
 Original Query:
@@ -98,7 +97,10 @@ Chunks:
 {chunks}
 
 Feedback:
-{improved_summarization}
+{review}
+
+Text to be rewritten:
+{text}
 """
 
 @describe_class(
@@ -352,14 +354,16 @@ class DeepSearch(RAGAgent):
         chat_response_review = self.llm.chat(
             [{"role": "user", "content": review_prompt}]
         )
-        improved_summarization = chat_response_review.content
+        review = chat_response_review.content
+        kwargs['thinking_callback'](review)
 
         # -- 4) Rewrite in detail with DETAILED_REWRITE_PROMPT
         rewrite_prompt = DETAILED_REWRITE_PROMPT.format(
             question=query,
             sub_queries=all_sub_queries,
             chunks=chunks_str,
-            improved_summarization=improved_summarization
+            review=review,
+            text=summary_text,
         )
         chat_response_detailed = self.llm.chat(
             [{"role": "user", "content": rewrite_prompt}]
