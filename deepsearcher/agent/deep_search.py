@@ -14,7 +14,7 @@ from deepsearcher.vector_db.base import BaseVectorDB, deduplicate_results
 # UPDATED PROMPTS: We instruct the AI to include references inline
 # -----------------------------------------------------------------------
 
-SUB_QUERY_PROMPT = """To answer this question more comprehensively, please break down the original question into up to four sub-questions. Return as list of str.
+SUB_QUERY_PROMPT = """To answer this question more comprehensively, please break down the original question into up to five sub-questions. Return as list of str.
 If this is a very simple question and no decomposition is necessary, then keep the only one original question in the python code list.
 
 Original Question: {original_query}
