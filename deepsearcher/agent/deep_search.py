@@ -363,77 +363,38 @@ class DeepSearch(RAGAgent):
         if not all_retrieved_results:
             return f"No relevant information found for query '{query}'.", [], n_token_retrieval
 
-        all_sub_queries = additional_info["all_sub_queries"]
+        # ... (your summarization, review, and rewriting steps here) ...
+        # omitted for brevity
 
-        # Collect chunk texts with references appended inline
-        chunk_texts = []
+        # Now we want to return the chunks grouped by file name in Markdown
+
+        # 1) Group chunks by file name
+        from collections import defaultdict
+        chunks_by_file = defaultdict(list)
+        
         for chunk in all_retrieved_results:
-            # Insert references inline at the end of each chunk snippet
             filename = os.path.basename(chunk.reference)
-            snippet_for_ref = chunk.text[:100].replace("\n", " ")
-            if len(chunk.text) > 100:
-                snippet_for_ref += "..."
-            if self.text_window_splitter and "wider_text" in chunk.metadata:
-                chunk_texts.append(
-                    f"{chunk.metadata['wider_text']}\n[Ref: {filename} => {snippet_for_ref}]"
-                )
-            else:
-                chunk_texts.append(
-                    f"{chunk.text}\n[Ref: {filename} => {snippet_for_ref}]"
-                )
+            chunk_text = chunk.text.strip()
+            chunks_by_file[filename].append(chunk_text)
 
-        # -- 2) Summarize with SUMMARY_PROMPT
-        log.color_print(f"<think> Summarizing from {len(all_retrieved_results)} chunks... </think>\n")
-        kwargs['thinking_callback']("Writting the final results")
-        summary_prompt = SUMMARY_PROMPT.format(
-            question=query,
-            mini_questions=all_sub_queries,
-            mini_chunk_str=self._format_chunk_texts(chunk_texts),
-        )
-        # chat_response_summary = self.llm.chat(
-        #     [{"role": "user", "content": summary_prompt}]
-        # )
-        # summary_text = chat_response_summary.content
+        # 2) Build a Markdown representation
+        markdown_result = []
+        markdown_result.append("### Retrieved Chunks by File\n")
+        for filename, texts in chunks_by_file.items():
+            markdown_result.append(f"#### {filename}")
+            for i, text in enumerate(texts, start=1):
+                # You could also truncate or highlight sections here if needed
+                markdown_result.append(f"**Snippet {i}:**\n```\n{text}\n```")
+            markdown_result.append("")  # Blank line
 
-        # # -- 3) Review the summary with REVIEW_PROMPT
-        # chunks_str = self._format_chunk_texts(chunk_texts)
-        # review_prompt = REVIEW_PROMPT.format(
-        #     question=query,
-        #     sub_queries=all_sub_queries,
-        #     chunks=chunks_str,
-        #     summarization=summary_text
-        # )
-        # chat_response_review = self.llm.chat(
-        #     [{"role": "user", "content": review_prompt}]
-        # )
-        # review = chat_response_review.content
-        # print(chunks_str)
-        # # -- 4) Rewrite in detail with DETAILED_REWRITE_PROMPT
-        # rewrite_prompt = DETAILED_REWRITE_PROMPT.format(
-        #     question=query,
-        #     sub_queries=all_sub_queries,
-        #     chunks=chunks_str,
-        #     review=review,
-        #     text=summary_text,
-        # )
-        # chat_response_detailed = self.llm.chat(
-        #     [{"role": "user", "content": rewrite_prompt}]
-        # )
-        # final_answer = chat_response_detailed.content
+        # Combine it all
+        chunks_markdown_str = "\n".join(markdown_result)
 
-        # # Print final answer to logs
-        # log.color_print("\n==== FINAL ANSWER====\n")
-        # log.color_print(final_answer)
+        # For example, you might want to return this grouped Markdown as your final answer
+        # or you can return it alongside the final text from your model.
+        total_tokens = n_token_retrieval  # plus your summarization steps if you do them
 
-        # # Tally up total tokens
-        total_tokens = (
-            n_token_retrieval
-            # + chat_response_summary.total_tokens
-            # + chat_response_review.total_tokens
-            # + chat_response_detailed.total_tokens
-        )
-
-        return self._format_chunk_texts(chunk_texts), all_retrieved_results, total_tokens
+        return chunks_markdown_str, all_retrieved_results, total_tokens
 
     def _format_chunk_texts(self, chunk_texts: List[str]) -> str:
         """Conveniently format chunk texts (which now contain references inline)."""
