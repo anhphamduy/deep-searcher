@@ -111,6 +111,7 @@ Text to be rewritten:
 {text}
 """
 
+
 @describe_class(
     "This agent is suitable for handling general and simple queries, such as writing a report, survey, or article."
 )
@@ -131,14 +132,19 @@ class DeepSearch(RAGAgent):
         self.max_iter = max_iter
         self.route_collection = route_collection
         if self.route_collection:
-            self.collection_router = CollectionRouter(llm=self.llm, vector_db=self.vector_db)
+            self.collection_router = CollectionRouter(
+                llm=self.llm, vector_db=self.vector_db
+            )
         self.text_window_splitter = text_window_splitter
 
     def _generate_sub_queries(self, original_query: str) -> Tuple[List[str], int]:
         """Given the original query, generate up to four sub-queries (or a single one if trivial)."""
         chat_response = self.llm.chat(
             messages=[
-                {"role": "user", "content": SUB_QUERY_PROMPT.format(original_query=original_query)}
+                {
+                    "role": "user",
+                    "content": SUB_QUERY_PROMPT.format(original_query=original_query),
+                }
             ]
         )
         response_content = chat_response.content
@@ -152,7 +158,9 @@ class DeepSearch(RAGAgent):
 
         # 1) Determine which sources to search in
         if self.route_collection:
-            selected_collections, n_token_route = self.collection_router.invoke(query=query)
+            selected_collections, n_token_route = self.collection_router.invoke(
+                query=query
+            )
         else:
             selected_collections = self.collection_router.all_collections
             n_token_route = 0
@@ -163,16 +171,11 @@ class DeepSearch(RAGAgent):
 
         # 2) Search each source
         for source in selected_collections:
-            log.color_print(
-                f"🔎 Looking for useful snippets about \"{query}\"\n"
-            )
-            thinking_callback(
-                f"🔎 Looking for useful snippets about \"{query}\"\n"
-            )
+            log.color_print(f'🔎 Looking for useful snippets about "{query}"\n')
+            thinking_callback(f'🔎 Looking for useful snippets about "{query}"\n')
 
             retrieved_results = self.vector_db.search_data(
-                collection=source,
-                vector=query_vector
+                collection=source, vector=query_vector
             )
             if not retrieved_results:
                 log.color_print(f"😕 No snippets found in {source}.\n")
@@ -187,11 +190,9 @@ class DeepSearch(RAGAgent):
 
                 async def rerank_snippet(retrieved_result=result, snippet=snippet):
                     thinking_callback(
-                        f"💭 Considering snippet for \"{query}\":\n→ \"{snippet}\"\n"
+                        f'💭 Considering snippet for "{query}":\n→ "{snippet}"\n'
                     )
-                    log.color_print(
-                        f"💭 Checking snippet:\n\"{snippet}\"\n"
-                    )
+                    log.color_print(f'💭 Checking snippet:\n"{snippet}"\n')
 
                     # Ask your LLM whether to keep the snippet
                     chat_response = self.llm.chat(
@@ -200,7 +201,7 @@ class DeepSearch(RAGAgent):
                                 "role": "user",
                                 "content": RERANK_PROMPT.format(
                                     query=[query] + sub_queries,
-                                    retrieved_chunk=f"<chunk>{retrieved_result.text}</chunk>"
+                                    retrieved_chunk=f"<chunk>{retrieved_result.text}</chunk>",
                                 ),
                             }
                         ]
@@ -209,10 +210,16 @@ class DeepSearch(RAGAgent):
 
                     # Remove hidden reasoning if present
                     if "<think>" in response_content and "</think>" in response_content:
-                        end_of_think = response_content.find("</think>") + len("</think>")
+                        end_of_think = response_content.find("</think>") + len(
+                            "</think>"
+                        )
                         response_content = response_content[end_of_think:].strip()
 
-                    return (retrieved_result, response_content, chat_response.total_tokens)
+                    return (
+                        retrieved_result,
+                        response_content,
+                        chat_response.total_tokens,
+                    )
 
                 tasks_rerank.append(asyncio.create_task(rerank_snippet()))
 
@@ -222,11 +229,13 @@ class DeepSearch(RAGAgent):
             # Process the outcomes
             accepted_count = 0
             references = set()
-            for (retrieved_result, response_content, used_tokens) in rerank_outcomes:
+            for retrieved_result, response_content, used_tokens in rerank_outcomes:
                 consume_tokens += used_tokens
 
                 # If it says "YES" or "MAYBE", accept the snippet
-                if ("YES" in response_content or "MAYBE" in response_content) and "NO" not in response_content:
+                if (
+                    "YES" in response_content or "MAYBE" in response_content
+                ) and "NO" not in response_content:
                     all_retrieved_results.append(retrieved_result)
                     accepted_count += 1
                     references.add(retrieved_result.reference)
@@ -239,7 +248,7 @@ class DeepSearch(RAGAgent):
                     link_list.append(f"[{file_name}]")
                 references_text = ", ".join(link_list)
                 msg = (
-                    f"✔️ Found {accepted_count} helpful snippet(s) for \"{query}\" in this source.\n"
+                    f'✔️ Found {accepted_count} helpful snippet(s) for "{query}" in this source.\n'
                     f"Relevant files: {references_text}\n"
                 )
                 log.color_print(msg)
@@ -253,18 +262,20 @@ class DeepSearch(RAGAgent):
         self,
         original_query: str,
         all_sub_queries: List[str],
-        all_chunks: List[RetrievalResult]
+        all_chunks: List[RetrievalResult],
     ) -> Tuple[List[str], int]:
         """Reflect to see if additional queries are needed to fill knowledge gaps."""
         if len(all_chunks) > 0:
-            mini_chunk_str = self._format_chunk_texts([chunk.text for chunk in all_chunks])
+            mini_chunk_str = self._format_chunk_texts(
+                [chunk.text for chunk in all_chunks]
+            )
         else:
             mini_chunk_str = "NO RELATED CHUNKS FOUND."
 
         reflect_prompt = REFLECT_PROMPT.format(
             question=original_query,
             mini_questions=all_sub_queries,
-            mini_chunk_str=mini_chunk_str
+            mini_chunk_str=mini_chunk_str,
         )
         print(reflect_prompt)
         chat_response = self.llm.chat([{"role": "user", "content": reflect_prompt}])
@@ -309,7 +320,9 @@ class DeepSearch(RAGAgent):
 
             # Create tasks (parallel searches for each sub-gap query)
             search_tasks = [
-                self._search_chunks_from_vectordb(q, sub_gap_queries, kwargs['thinking_callback'])
+                self._search_chunks_from_vectordb(
+                    q, sub_gap_queries, kwargs["thinking_callback"]
+                )
                 for q in sub_gap_queries
             ]
             search_results = await asyncio.gather(*search_tasks)
@@ -318,7 +331,7 @@ class DeepSearch(RAGAgent):
             for res, consumed_token in search_results:
                 total_tokens += consumed_token
                 search_res_from_vectordb.extend(res)
-            
+
             # Deduplicate
             search_res_from_vectordb = deduplicate_results(search_res_from_vectordb)
             all_search_res.extend(search_res_from_vectordb + search_res_from_internet)
@@ -329,7 +342,7 @@ class DeepSearch(RAGAgent):
 
             # 3) Reflection for gap queries
             log.color_print("<think> Reflecting on search results... </think>\n")
-            kwargs['thinking_callback']("Reflecting on the search results...")
+            kwargs["thinking_callback"]("Reflecting on the search results...")
             sub_gap_queries, consumed_token = self._generate_gap_queries(
                 original_query, all_sub_queries, all_search_res
             )
@@ -339,9 +352,7 @@ class DeepSearch(RAGAgent):
                 log.color_print("<think> No new queries generated. Exiting. </think>\n")
                 break
 
-            log.color_print(
-                f"<think> Additional queries: {sub_gap_queries} </think>\n"
-            )
+            log.color_print(f"<think> Additional queries: {sub_gap_queries} </think>\n")
             all_sub_queries.extend(sub_gap_queries)
 
         # Final deduplication
@@ -359,9 +370,15 @@ class DeepSearch(RAGAgent):
         Returns the final answer and retrieval results.
         """
         # -- 1) Retrieve
-        all_retrieved_results, n_token_retrieval, additional_info = self.retrieve(query, **kwargs)
+        all_retrieved_results, n_token_retrieval, additional_info = self.retrieve(
+            query, **kwargs
+        )
         if not all_retrieved_results:
-            return f"No relevant information found for query '{query}'.", [], n_token_retrieval
+            return (
+                f"No relevant information found for query '{query}'.",
+                [],
+                n_token_retrieval,
+            )
 
         # ... (your summarization, review, and rewriting steps here) ...
         # omitted for brevity
@@ -370,8 +387,9 @@ class DeepSearch(RAGAgent):
 
         # 1) Group chunks by file name
         from collections import defaultdict
+
         chunks_by_file = defaultdict(list)
-        
+
         for chunk in all_retrieved_results:
             filename = os.path.basename(chunk.reference)
             chunk_text = chunk.text.strip()
