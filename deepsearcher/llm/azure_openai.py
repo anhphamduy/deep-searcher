@@ -28,11 +28,16 @@ class AzureOpenAI(BaseLLM):
             **kwargs,
         )
 
-    def chat(self, messages: List[Dict]) -> ChatResponse:
-        completion = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-        )
+    def chat(self, messages: List[Dict], json_mode=False) -> ChatResponse:
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+        }
+
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        completion = self.client.chat.completions.create(**kwargs)
         return ChatResponse(
             content=completion.choices[0].message.content,
             total_tokens=completion.usage.total_tokens,

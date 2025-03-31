@@ -1,6 +1,7 @@
 import asyncio
 from typing import List, Tuple
 import os
+import json
 
 from deepsearcher.agent.base import RAGAgent, describe_class
 from deepsearcher.agent.collection_router import CollectionRouter
@@ -11,7 +12,7 @@ from deepsearcher.vector_db import RetrievalResult
 from deepsearcher.vector_db.base import BaseVectorDB, deduplicate_results
 
 # -----------------------------------------------------------------------
-# UPDATED PROMPTS: We instruct the AI to include references inline
+# UPDATED PROMPTS
 # -----------------------------------------------------------------------
 
 SUB_QUERY_PROMPT = """To answer this question more comprehensively, please break down the original question into up to five sub-questions. Return as list of str.
@@ -43,72 +44,41 @@ Retrieved Chunk: {retrieved_chunk}
 Is the chunk helpful in answering any of the questions?
 """
 
-REFLECT_PROMPT = """Determine whether additional search queries are needed based on the original query, previous sub queries, and all retrieved document chunks. If further research is required, provide a Python list of up to 4 search queries. If no further research is required, return an empty list. Further search is required when there is a lack of details, or more clarifications or definitions are needed, or if the search results are too generalized.
+########################################################################
+# MAIN CHANGE: REFLECT_PROMPT returning JSON with "reason" and "questions"
+########################################################################
+REFLECT_PROMPT = """Determine whether additional search queries are needed based on the original query, previous sub queries, and all retrieved document chunks.
+Output valid JSON with two fields: "reason" (a string) and "questions" (an array of strings).
 
-If the original query is to write a report, then you prefer to generate some further queries, otherwise return an empty list.
+- "reason" should explain why more questions are (or aren't) needed.
+- "questions" is a list of at most 4 additional search questions. If no further research is needed, keep "questions" empty.
+
+Example valid JSON:
+{{
+  "reason": "We need more information about prior studies on the subject.",
+  "questions": ["What prior research is cited?", "Are there any references to external data?"]
+}}
+
+If no further research is needed, return an empty list for "questions" with an explanation in "reason".
 
 Original Query: {question}
-
 Previous Sub Queries: {mini_questions}
 
 Related Chunks: 
 {mini_chunk_str}
-
-Respond exclusively in valid List of str format without any other text.
 """
 
-SUMMARY_PROMPT = """You are an AI content analysis expert with strong skills in restructuring and refining content for better comprehension. Your task is to rewrite the provided information into a well-structured, coherent, and AI-friendly format while preserving all details—include even the smallest details. Avoid over-generalization.
-
-IMPORTANT: Please include inline references exactly as they appear in the provided chunk texts. Each chunk may already contain a line like: 
-[Ref: filename => partial snippet...]
-Make sure to keep those references inline in your summary wherever you use or paraphrase the corresponding content.
+SUMMARY_PROMPT = """You are an AI content analysis expert. Please write a concise summary of all relevant chunks below. 
+Preserve key facts, references, or citations if present. Output plain text.
 
 Original Query:
 {question}
 
-Previous Sub-Queries:
+Sub-Queries:
 {mini_questions}
 
-Relevant Document Chunks (with references injected):
+Relevant Document Chunks:
 {mini_chunk_str}
-"""
-
-REVIEW_PROMPT = """Analyze the following rewrite critically and identify any issues with correctness, completeness, or clarity.
-We have provided the original query, sub-queries, and relevant chunks for reference.
-Highlight missing details, inaccuracies, overly generalized statements, or any other weaknesses.
-Only point out areas that need improvement—do not include positive feedback.
-
-Original Query:
-{question}
-
-Sub-Queries:
-{sub_queries}
-
-Chunks:
-{chunks}
-
-Text to be reviewed:
-{summarization}"""
-
-DETAILED_REWRITE_PROMPT = """Now based on the feedback, rewrite the first rewrite to be more detailed and thorough, incorporating any missing definitions, clarifications, or important details referenced in the question, sub-queries, or chunks. 
-Return the final detailed summary as plain text.
-
-IMPORTANT: Continue to include inline references as they appear in the chunk texts (e.g., [Ref: filename => ...]) for any information taken from those chunks.
-
-Original Query:
-{question}
-
-Sub-Queries:
-{sub_queries}
-
-Chunks:
-{chunks}
-
-Feedback:
-{review}
-
-Text to be rewritten:
-{text}
 """
 
 
@@ -151,7 +121,11 @@ class DeepSearch(RAGAgent):
         return self.llm.literal_eval(response_content), chat_response.total_tokens
 
     async def _search_chunks_from_vectordb(
-        self, query: str, sub_queries: List[str], thinking_callback
+        self,
+        query: str,
+        sub_queries: List[str],
+        thinking_callback,
+        question_id: str,
     ) -> Tuple[List[RetrievalResult], int]:
         """Search the vector DB for the given query and sub-queries. Return accepted chunks plus token usage."""
         consume_tokens = 0
@@ -171,9 +145,6 @@ class DeepSearch(RAGAgent):
 
         # 2) Search each source
         for source in selected_collections:
-            log.color_print(f'🔎 Looking for useful snippets about "{query}"\n')
-            thinking_callback(f'🔎 Looking for useful snippets about "{query}"\n')
-
             retrieved_results = self.vector_db.search_data(
                 collection=source, vector=query_vector
             )
@@ -189,12 +160,6 @@ class DeepSearch(RAGAgent):
                     snippet += "..."
 
                 async def rerank_snippet(retrieved_result=result, snippet=snippet):
-                    thinking_callback(
-                        f'💭 Considering snippet for "{query}":\n→ "{snippet}"\n'
-                    )
-                    log.color_print(f'💭 Checking snippet:\n"{snippet}"\n')
-
-                    # Ask your LLM whether to keep the snippet
                     chat_response = self.llm.chat(
                         messages=[
                             {
@@ -223,24 +188,38 @@ class DeepSearch(RAGAgent):
 
                 tasks_rerank.append(asyncio.create_task(rerank_snippet()))
 
-            # Wait for all re-rank tasks to complete
             rerank_outcomes = await asyncio.gather(*tasks_rerank)
 
-            # Process the outcomes
+            chunk_eval_event = {
+                "eventType": "chunk-evaluation",
+                "questionId": question_id,
+                "chunks": [],
+            }
+
             accepted_count = 0
             references = set()
             for retrieved_result, response_content, used_tokens in rerank_outcomes:
                 consume_tokens += used_tokens
+                filename = os.path.basename(retrieved_result.reference)
 
                 # If it says "YES" or "MAYBE", accept the snippet
                 if (
                     "YES" in response_content or "MAYBE" in response_content
                 ) and "NO" not in response_content:
+                    chunk_eval_event["chunks"].append(
+                        {
+                            "chunk": retrieved_result.text,
+                            "evaluation": response_content,
+                            "filename": filename,
+                        }
+                    )
                     all_retrieved_results.append(retrieved_result)
                     accepted_count += 1
                     references.add(retrieved_result.reference)
 
-            # Build a friendlier message with just file names as links
+            # Emit chunk-evaluation event
+            thinking_callback(chunk_eval_event)
+
             if accepted_count > 0:
                 link_list = []
                 for ref in references:
@@ -248,23 +227,26 @@ class DeepSearch(RAGAgent):
                     link_list.append(f"[{file_name}]")
                 references_text = ", ".join(link_list)
                 msg = (
-                    f'✔️ Found {accepted_count} helpful snippet(s) for "{query}" in this source.\n'
-                    f"Relevant files: {references_text}\n"
+                    f'✔️ Found {accepted_count} helpful snippet(s) for "{query}".\n'
+                    f"Relevant files: {references_text}"
                 )
-                log.color_print(msg)
-                thinking_callback(msg)
             else:
                 log.color_print("🙁 None of these snippets seemed helpful.\n")
 
         return all_retrieved_results, consume_tokens
 
+    ########################################################################
+    # UPDATED GAP QUERIES: parse JSON -> { "reason": "...", "questions": [] }
+    ########################################################################
     def _generate_gap_queries(
         self,
         original_query: str,
         all_sub_queries: List[str],
         all_chunks: List[RetrievalResult],
-    ) -> Tuple[List[str], int]:
-        """Reflect to see if additional queries are needed to fill knowledge gaps."""
+    ) -> Tuple[str, List[str], int]:
+        """Reflect to see if additional queries are needed to fill knowledge gaps.
+        Returns (reason, questions, tokens_used).
+        If 'questions' is empty => final answer scenario."""
         if len(all_chunks) > 0:
             mini_chunk_str = self._format_chunk_texts(
                 [chunk.text for chunk in all_chunks]
@@ -277,10 +259,54 @@ class DeepSearch(RAGAgent):
             mini_questions=all_sub_queries,
             mini_chunk_str=mini_chunk_str,
         )
-        print(reflect_prompt)
-        chat_response = self.llm.chat([{"role": "user", "content": reflect_prompt}])
+        chat_response = self.llm.chat([{"role": "user", "content": reflect_prompt}], json_mode=True)
         response_content = chat_response.content
-        return self.llm.literal_eval(response_content), chat_response.total_tokens
+        tokens_used = chat_response.total_tokens
+
+        # Now parse the JSON.
+        # We expect something like:
+        # {
+        #   "reason": "...",
+        #   "questions": ["...", "..."]
+        # }
+        try:
+            reflect_result = json.loads(response_content)
+            reason = reflect_result.get("reason", "")
+            questions = reflect_result.get("questions", [])
+        except json.JSONDecodeError:
+            # Fallback if the model returned something else
+            reason = "Could not parse reflection JSON."
+            questions = []
+
+        return reason, questions, tokens_used
+
+    ########################################################################
+    # Additional helper to produce final chunk summary with SUMMARY_PROMPT
+    ########################################################################
+    def _generate_summary(
+        self,
+        original_query: str,
+        all_sub_queries: List[str],
+        all_chunks: List[RetrievalResult],
+    ) -> Tuple[str, int]:
+        """Use SUMMARY_PROMPT to create a short final summary from all retrieved chunks."""
+        if not all_chunks:
+            return "No relevant information found.", 0
+
+        # Format chunk strings
+        chunk_texts = [chunk.text for chunk in all_chunks]
+        chunk_str = self._format_chunk_texts(chunk_texts)
+
+        prompt_text = SUMMARY_PROMPT.format(
+            question=original_query,
+            mini_questions=all_sub_queries,
+            mini_chunk_str=chunk_str,
+        )
+        chat_response = self.llm.chat([{"role": "user", "content": prompt_text}])
+        summary_text = chat_response.content
+        tokens_used = chat_response.total_tokens
+
+        return summary_text, tokens_used
 
     def retrieve(
         self, original_query: str, **kwargs
@@ -291,8 +317,14 @@ class DeepSearch(RAGAgent):
     async def async_retrieve(
         self, original_query: str, **kwargs
     ) -> Tuple[List[RetrievalResult], int, dict]:
-        """Orchestrate the search with sub-queries and reflection for additional queries."""
+        """
+        Orchestrate the search with sub-queries and reflection for additional queries.
+        - Calls reflection which now returns JSON with { reason, questions }.
+        - If questions are empty => final answer scenario.
+        """
         max_iter = kwargs.pop("max_iter", self.max_iter)
+        thinking_callback = kwargs.get("thinking_callback", lambda x: None)
+
         log.color_print(f"<query> {original_query} </query>\n")
 
         all_search_res = []
@@ -302,74 +334,150 @@ class DeepSearch(RAGAgent):
         # 1) Generate sub-queries
         sub_queries, used_token = self._generate_sub_queries(original_query)
         total_tokens += used_token
+
+        # Let caller know which sub-questions we ended up with
+        thinking_callback(
+            {
+                "eventType": "questions-generated",
+                "questions": sub_queries,
+            }
+        )
+
         if not sub_queries:
-            log.color_print("<think> No sub-queries generated. Exiting. </think>\n")
+            # No sub-queries means we can produce a final answer right away
+            # But let's say no relevant info
+            thinking_callback(
+                {
+                    "event": "message",
+                    "data": {
+                        "eventType": "final-answer",
+                        "researchSessionId": "67890",
+                        "answer": f"No sub-queries needed. Possibly no relevant info for '{original_query}'",
+                        "relevant_chunks": [],
+                    },
+                }
+            )
             return [], total_tokens, {}
 
-        log.color_print(
-            f"<think> Sub-queries for '{original_query}': {sub_queries}</think>\n"
-        )
         all_sub_queries.extend(sub_queries)
-        sub_gap_queries = sub_queries
 
         # 2) Iterative retrieval
+        question_counter = 1
         for iteration in range(max_iter):
             log.color_print(f">> Iteration: {iteration + 1}\n")
-            search_res_from_vectordb = []
-            search_res_from_internet = []  # (Placeholder)
+            sub_gap_queries = sub_queries
 
-            # Create tasks (parallel searches for each sub-gap query)
-            search_tasks = [
-                self._search_chunks_from_vectordb(
-                    q, sub_gap_queries, kwargs["thinking_callback"]
+            # We'll search each sub-gap query in parallel
+            search_tasks = []
+            for i, sq in enumerate(sub_gap_queries, start=1):
+                qid = f"q{question_counter}"
+                question_counter += 1
+                search_tasks.append(
+                     self._search_chunks_from_vectordb(
+                            sq,
+                            sub_gap_queries,
+                            thinking_callback,
+                            question_id=qid,
+                        )
                 )
-                for q in sub_gap_queries
-            ]
+
+            # Wait for all parallel searches
             search_results = await asyncio.gather(*search_tasks)
 
             # Merge all results
+            search_res_from_vectordb = []
             for res, consumed_token in search_results:
                 total_tokens += consumed_token
                 search_res_from_vectordb.extend(res)
 
             # Deduplicate
             search_res_from_vectordb = deduplicate_results(search_res_from_vectordb)
-            all_search_res.extend(search_res_from_vectordb + search_res_from_internet)
-
-            if iteration == max_iter - 1:
-                log.color_print("<think> Exceeded max iterations. </think>\n")
-                break
+            all_search_res.extend(search_res_from_vectordb)
+            all_search_res = deduplicate_results(all_search_res)
 
             # 3) Reflection for gap queries
-            log.color_print("<think> Reflecting on search results... </think>\n")
-            kwargs["thinking_callback"]("Reflecting on the search results...")
-            sub_gap_queries, consumed_token = self._generate_gap_queries(
+            if iteration == max_iter - 1:
+                log.color_print("<think> Exceeded max iterations. </think>\n")
+                # We'll just break and finalize
+                break
+
+            reason, new_questions, consumed_token = self._generate_gap_queries(
                 original_query, all_sub_queries, all_search_res
             )
             total_tokens += consumed_token
 
-            if not sub_gap_queries:
-                log.color_print("<think> No new queries generated. Exiting. </think>\n")
+            # If new_questions is not empty => we have another iteration
+            if new_questions:
+                # Fire "questions-generated" again
+                thinking_callback(
+                    {
+                        "eventType": "questions-generated",
+                        "questions": new_questions,
+                    }
+                )
+                # Also produce reflection event with the reason
+                thinking_callback(
+                    {
+                        "event": "message",
+                        "data": {
+                            "eventType": "reflection",
+                            "researchSessionId": "67890",
+                            "step": 2,
+                            "reflection": reason or "Additional search needed.",
+                        },
+                    }
+                )
+                all_sub_queries.extend(new_questions)
+                sub_queries = new_questions
+            else:
+                # No new questions => final answer scenario
+                thinking_callback(
+                    {
+                        "event": "message",
+                        "data": {
+                            "eventType": "reflection",
+                            "researchSessionId": "67890",
+                            "step": 2,
+                            "reflection": reason or "No further queries needed.",
+                        },
+                    }
+                )
                 break
 
-            log.color_print(f"<think> Additional queries: {sub_gap_queries} </think>\n")
-            all_sub_queries.extend(sub_gap_queries)
+        # If we exit the loop, let's produce a final answer event:
+        # 4) Produce final summary
+        summary_text, sum_tokens = self._generate_summary(
+            original_query, all_sub_queries, all_search_res
+        )
+        total_tokens += sum_tokens
 
-        # Final deduplication
-        all_search_res = deduplicate_results(all_search_res)
+        # Format relevant chunks to the requested final structure
+        relevant_chunks_data = []
+        for r in all_search_res:
+            relevant_chunks_data.append(
+                {"file_path": r.reference, "relevant_content": r.text}
+            )
+
+        thinking_callback(
+            {
+                "event": "message",
+                "data": {
+                    "eventType": "final-answer",
+                    "researchSessionId": "67890",
+                    "answer": summary_text,
+                    "relevant_chunks": relevant_chunks_data,
+                },
+            }
+        )
+
         additional_info = {"all_sub_queries": all_sub_queries}
-        print("len is " + str(len(all_search_res)))
         return all_search_res, total_tokens, additional_info
 
     def query(self, query: str, **kwargs) -> Tuple[str, List[RetrievalResult], int]:
         """
         1) Retrieves relevant chunks for 'query'.
-        2) Summarizes them using SUMMARY_PROMPT.
-        3) Reviews the summary using REVIEW_PROMPT (with question/sub-queries/chunks).
-        4) Rewrites the improved summary in more detail using DETAILED_REWRITE_PROMPT.
-        Returns the final answer and retrieval results.
+        2) Summarizes them and returns final answer + retrieval results.
         """
-        # -- 1) Retrieve
         all_retrieved_results, n_token_retrieval, additional_info = self.retrieve(
             query, **kwargs
         )
@@ -380,42 +488,18 @@ class DeepSearch(RAGAgent):
                 n_token_retrieval,
             )
 
-        # ... (your summarization, review, and rewriting steps here) ...
-        # omitted for brevity
+        # Return "answer" plus the raw retrieval results
+        # (the final answer was already sent to thinking_callback event above)
+        return (
+            "See final-answer event above for summary.",
+            all_retrieved_results,
+            n_token_retrieval,
+        )
 
-        # Now we want to return the chunks grouped by file name in Markdown
-
-        # 1) Group chunks by file name
-        from collections import defaultdict
-
-        chunks_by_file = defaultdict(list)
-
-        for chunk in all_retrieved_results:
-            filename = os.path.basename(chunk.reference)
-            chunk_text = chunk.text.strip()
-            chunks_by_file[filename].append(chunk_text)
-
-        # 2) Build a Markdown representation
-        markdown_result = []
-        markdown_result.append("### Retrieved Chunks by File\n")
-        for filename, texts in chunks_by_file.items():
-            markdown_result.append(f"#### {filename}")
-            for i, text in enumerate(texts, start=1):
-                # You could also truncate or highlight sections here if needed
-                markdown_result.append(f"**Snippet {i}:**\n```\n{text}\n```")
-            markdown_result.append("")  # Blank line
-
-        # Combine it all
-        chunks_markdown_str = "\n".join(markdown_result)
-
-        # For example, you might want to return this grouped Markdown as your final answer
-        # or you can return it alongside the final text from your model.
-        total_tokens = n_token_retrieval  # plus your summarization steps if you do them
-
-        return chunks_markdown_str, all_retrieved_results, total_tokens
-
+    #######################################################################
+    # Helper to format chunk texts with <chunk_i> ...
+    #######################################################################
     def _format_chunk_texts(self, chunk_texts: List[str]) -> str:
-        """Conveniently format chunk texts (which now contain references inline)."""
         chunk_str = ""
         for i, chunk in enumerate(chunk_texts):
             chunk_str += f"<chunk_{i}>\n{chunk}\n</chunk_{i}>\n"

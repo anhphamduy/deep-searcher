@@ -114,17 +114,17 @@ class Milvus(BaseVectorDB):
                 collection_name=collection,
                 data=[vector],
                 limit=top_k,
-                output_fields=["embedding", "text", "reference", "metadata"],
+                output_fields=["text", "source"],
                 timeout=10,
             )
 
             return [
                 RetrievalResult(
-                    embedding=b["entity"]["embedding"],
+                    embedding="",
                     text=b["entity"]["text"],
-                    reference=b["entity"]["reference"],
+                    reference=b["entity"]["source"],
                     score=b["distance"],
-                    metadata=b["entity"]["metadata"],
+                    metadata={},
                 )
                 for a in search_results
                 for b in a
