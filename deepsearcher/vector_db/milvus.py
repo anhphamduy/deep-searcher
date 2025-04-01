@@ -1,7 +1,7 @@
 from typing import List, Optional, Union
 
 import numpy as np
-from pymilvus import DataType, MilvusClient
+from pymilvus import DataType, MilvusClient, AsyncMilvusClient
 
 from deepsearcher.loader.splitter import Chunk
 from deepsearcher.tools import log
@@ -23,6 +23,10 @@ class Milvus(BaseVectorDB):
         super().__init__(default_collection)
         self.default_collection = default_collection
         self.client = MilvusClient(uri=uri, token=token, db_name=db, timeout=30)
+        self.uri = uri
+        self.token = token
+        self.db_name = db
+        
 
     def init_collection(
         self,
@@ -132,6 +136,42 @@ class Milvus(BaseVectorDB):
         except Exception as e:
             log.critical(f"fail to search data, error info: {e}")
             return []
+        
+    async def asearch_data(
+        self,
+        collection: Optional[str],
+        vector: Union[np.array, List[float]],
+        top_k: int = 12,
+        *args,
+        **kwargs,
+    ) -> List[RetrievalResult]:
+        self.async_client = AsyncMilvusClient(uri=self.uri, token=self.token, db_name=self.db_name, timeout=30)
+        if not collection:
+            collection = self.default_collection
+        try:
+            search_results = await self.async_client.search(
+                collection_name=collection,
+                data=[vector],
+                limit=top_k,
+                output_fields=["text", "source"],
+                timeout=10,
+            )
+
+            return [
+                RetrievalResult(
+                    embedding="",
+                    text=b["entity"]["text"],
+                    reference=b["entity"]["source"],
+                    score=b["distance"],
+                    metadata={},
+                )
+                for a in search_results
+                for b in a
+            ]
+        except Exception as e:
+            log.critical(f"fail to search data, error info: {e}")
+            return []
+
 
     def list_collections(self, *args, **kwargs) -> List[CollectionInfo]:
         collection_infos = []

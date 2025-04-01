@@ -1,7 +1,7 @@
 import asyncio
-from typing import List, Tuple
-import os
 import json
+import os
+from typing import List, Tuple
 
 from deepsearcher.agent.base import RAGAgent, describe_class
 from deepsearcher.agent.collection_router import CollectionRouter
@@ -126,6 +126,7 @@ class DeepSearch(RAGAgent):
         sub_queries: List[str],
         thinking_callback,
         question_id: str,
+        session_id,
     ) -> Tuple[List[RetrievalResult], int]:
         """Search the vector DB for the given query and sub-queries. Return accepted chunks plus token usage."""
         consume_tokens = 0
@@ -145,8 +146,8 @@ class DeepSearch(RAGAgent):
 
         # 2) Search each source
         for source in selected_collections:
-            retrieved_results = self.vector_db.search_data(
-                collection=source, vector=query_vector
+            retrieved_results = await self.vector_db.asearch_data(
+                collection=source, vector=query_vector, session_id=session_id
             )
             if not retrieved_results:
                 log.color_print(f"😕 No snippets found in {source}.\n")
@@ -160,7 +161,7 @@ class DeepSearch(RAGAgent):
                     snippet += "..."
 
                 async def rerank_snippet(retrieved_result=result, snippet=snippet):
-                    chat_response = self.llm.chat(
+                    chat_response = await self.llm.achat(
                         messages=[
                             {
                                 "role": "user",
@@ -186,13 +187,14 @@ class DeepSearch(RAGAgent):
                         chat_response.total_tokens,
                     )
 
-                tasks_rerank.append(asyncio.create_task(rerank_snippet()))
+                tasks_rerank.append(rerank_snippet())
 
             rerank_outcomes = await asyncio.gather(*tasks_rerank)
 
             chunk_eval_event = {
                 "eventType": "chunk-evaluation",
                 "questionId": question_id,
+                "question": query,
                 "chunks": [],
             }
 
@@ -259,7 +261,9 @@ class DeepSearch(RAGAgent):
             mini_questions=all_sub_queries,
             mini_chunk_str=mini_chunk_str,
         )
-        chat_response = self.llm.chat([{"role": "user", "content": reflect_prompt}], json_mode=True)
+        chat_response = self.llm.chat(
+            [{"role": "user", "content": reflect_prompt}], json_mode=True
+        )
         response_content = chat_response.content
         tokens_used = chat_response.total_tokens
 
@@ -373,12 +377,13 @@ class DeepSearch(RAGAgent):
                 qid = f"q{question_counter}"
                 question_counter += 1
                 search_tasks.append(
-                     self._search_chunks_from_vectordb(
-                            sq,
-                            sub_gap_queries,
-                            thinking_callback,
-                            question_id=qid,
-                        )
+                    self._search_chunks_from_vectordb(
+                        sq,
+                        sub_gap_queries,
+                        thinking_callback,
+                        question_id=qid,
+                        session_id=kwargs['file_index_session_id']
+                    )
                 )
 
             # Wait for all parallel searches
@@ -407,15 +412,7 @@ class DeepSearch(RAGAgent):
             total_tokens += consumed_token
 
             # If new_questions is not empty => we have another iteration
-            if new_questions:
-                # Fire "questions-generated" again
-                thinking_callback(
-                    {
-                        "eventType": "questions-generated",
-                        "questions": new_questions,
-                    }
-                )
-                # Also produce reflection event with the reason
+            if new_questions:                
                 thinking_callback(
                     {
                         "event": "message",
@@ -427,6 +424,13 @@ class DeepSearch(RAGAgent):
                         },
                     }
                 )
+                thinking_callback(
+                    {
+                        "eventType": "questions-generated",
+                        "questions": new_questions,
+                    }
+                )
+                
                 all_sub_queries.extend(new_questions)
                 sub_queries = new_questions
             else:
@@ -436,8 +440,7 @@ class DeepSearch(RAGAgent):
                         "event": "message",
                         "data": {
                             "eventType": "reflection",
-                            "researchSessionId": "67890",
-                            "step": 2,
+                            "step": iteration,
                             "reflection": reason or "No further queries needed.",
                         },
                     }
