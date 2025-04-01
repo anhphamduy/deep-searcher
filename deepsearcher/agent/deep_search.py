@@ -352,13 +352,10 @@ class DeepSearch(RAGAgent):
             # But let's say no relevant info
             thinking_callback(
                 {
-                    "event": "message",
-                    "data": {
-                        "eventType": "final-answer",
-                        "researchSessionId": "67890",
-                        "answer": f"No sub-queries needed. Possibly no relevant info for '{original_query}'",
-                        "relevant_chunks": [],
-                    },
+                    "eventType": "final-answer",
+                    "researchSessionId": "67890",
+                    "answer": f"No sub-queries needed. Possibly no relevant info for '{original_query}'",
+                    "relevant_chunks": [],
                 }
             )
             return [], total_tokens, {}
@@ -382,7 +379,7 @@ class DeepSearch(RAGAgent):
                         sub_gap_queries,
                         thinking_callback,
                         question_id=qid,
-                        session_id=kwargs['file_index_session_id']
+                        session_id=kwargs["file_index_session_id"],
                     )
                 )
 
@@ -412,16 +409,13 @@ class DeepSearch(RAGAgent):
             total_tokens += consumed_token
 
             # If new_questions is not empty => we have another iteration
-            if new_questions:                
+            if new_questions:
                 thinking_callback(
                     {
-                        "event": "message",
-                        "data": {
-                            "eventType": "reflection",
-                            "researchSessionId": "67890",
-                            "step": 2,
-                            "reflection": reason or "Additional search needed.",
-                        },
+                        "eventType": "reflection",
+                        "researchSessionId": "67890",
+                        "step": 2,
+                        "reflection": reason or "Additional search needed.",
                     }
                 )
                 thinking_callback(
@@ -430,19 +424,16 @@ class DeepSearch(RAGAgent):
                         "questions": new_questions,
                     }
                 )
-                
+
                 all_sub_queries.extend(new_questions)
                 sub_queries = new_questions
             else:
                 # No new questions => final answer scenario
                 thinking_callback(
                     {
-                        "event": "message",
-                        "data": {
-                            "eventType": "reflection",
-                            "step": iteration,
-                            "reflection": reason or "No further queries needed.",
-                        },
+                        "eventType": "reflection",
+                        "step": iteration,
+                        "reflection": reason or "No further queries needed.",
                     }
                 )
                 break
@@ -463,13 +454,10 @@ class DeepSearch(RAGAgent):
 
         thinking_callback(
             {
-                "event": "message",
-                "data": {
-                    "eventType": "final-answer",
-                    "researchSessionId": "67890",
-                    "answer": summary_text,
-                    "relevant_chunks": relevant_chunks_data,
-                },
+                "eventType": "final-answer",
+                "researchSessionId": "67890",
+                "answer": summary_text,
+                "relevant_chunks": relevant_chunks_data,
             }
         )
 
