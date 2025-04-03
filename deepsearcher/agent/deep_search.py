@@ -353,7 +353,6 @@ class DeepSearch(RAGAgent):
             thinking_callback(
                 {
                     "eventType": "final-answer",
-                    "researchSessionId": "67890",
                     "answer": f"No sub-queries needed. Possibly no relevant info for '{original_query}'",
                     "relevant_chunks": [],
                 }
@@ -413,7 +412,6 @@ class DeepSearch(RAGAgent):
                 thinking_callback(
                     {
                         "eventType": "reflection",
-                        "researchSessionId": "67890",
                         "step": 2,
                         "reflection": reason or "Additional search needed.",
                     }
@@ -455,7 +453,6 @@ class DeepSearch(RAGAgent):
         thinking_callback(
             {
                 "eventType": "final-answer",
-                "researchSessionId": "67890",
                 "answer": summary_text,
                 "relevant_chunks": relevant_chunks_data,
             }
