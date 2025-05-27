@@ -220,7 +220,7 @@ class DeepSearch(RAGAgent):
                     references.add(retrieved_result.reference)
 
             # Emit chunk-evaluation event
-            thinking_callback(chunk_eval_event)
+            await thinking_callback(chunk_eval_event)
 
             if accepted_count > 0:
                 link_list = []
@@ -340,7 +340,7 @@ class DeepSearch(RAGAgent):
         total_tokens += used_token
 
         # Let caller know which sub-questions we ended up with
-        thinking_callback(
+        await thinking_callback(
             {
                 "eventType": "questions-generated",
                 "questions": sub_queries,
@@ -409,14 +409,14 @@ class DeepSearch(RAGAgent):
 
             # If new_questions is not empty => we have another iteration
             if new_questions:
-                thinking_callback(
+                await thinking_callback(
                     {
                         "eventType": "reflection",
                         "step": 2,
                         "reflection": reason or "Additional search needed.",
                     }
                 )
-                thinking_callback(
+                await thinking_callback(
                     {
                         "eventType": "questions-generated",
                         "questions": new_questions,
@@ -427,7 +427,7 @@ class DeepSearch(RAGAgent):
                 sub_queries = new_questions
             else:
                 # No new questions => final answer scenario
-                thinking_callback(
+                await thinking_callback(
                     {
                         "eventType": "reflection",
                         "step": iteration,
@@ -450,7 +450,7 @@ class DeepSearch(RAGAgent):
                 {"file_path": r.reference, "relevant_content": r.text}
             )
 
-        thinking_callback(
+        await thinking_callback(
             {
                 "eventType": "final-answer",
                 "answer": summary_text,
