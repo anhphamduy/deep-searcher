@@ -109,16 +109,22 @@ class DeepSearch(RAGAgent):
 
     def _generate_sub_queries(self, original_query: str) -> Tuple[List[str], int]:
         """Given the original query, generate up to four sub-queries (or a single one if trivial)."""
-        chat_response = self.llm.chat(
-            messages=[
-                {
-                    "role": "user",
-                    "content": SUB_QUERY_PROMPT.format(original_query=original_query),
-                }
-            ]
-        )
-        response_content = chat_response.content
-        return self.llm.literal_eval(response_content), chat_response.total_tokens
+        try:
+            chat_response = self.llm.chat(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": SUB_QUERY_PROMPT.format(original_query=original_query),
+                    }
+                ]
+            )
+            response_content = chat_response.content
+            sub_queries = self.llm.literal_eval(response_content)
+            return sub_queries, chat_response.total_tokens
+        except Exception as e:
+            # If we can't generate sub-queries, return the original query as fallback
+            log.color_print(f"⚠️ Failed to generate sub-queries: {str(e)}\n")
+            return [original_query], 0
 
     async def _search_chunks_from_vectordb(
         self,
@@ -132,23 +138,65 @@ class DeepSearch(RAGAgent):
         consume_tokens = 0
 
         # 1) Determine which sources to search in
-        if self.route_collection:
-            selected_collections, n_token_route = self.collection_router.invoke(
-                query=query
-            )
-        else:
-            selected_collections = self.collection_router.all_collections
-            n_token_route = 0
-        consume_tokens += n_token_route
+        try:
+            if self.route_collection:
+                selected_collections, n_token_route = self.collection_router.invoke(
+                    query=query
+                )
+            else:
+                selected_collections = self.collection_router.all_collections
+                n_token_route = 0
+            consume_tokens += n_token_route
+        except Exception as e:
+            await thinking_callback({
+                "eventType": "research-failures",
+                "subEventType": "collection-routing-failure",
+                "error": str(e),
+                "details": {
+                    "query": query,
+                    "questionId": question_id
+                }
+            })
+            # Fallback to all collections if routing fails
+            selected_collections = getattr(self.collection_router, 'all_collections', [])
+            if not selected_collections:
+                return [], consume_tokens
 
         all_retrieved_results = []
-        query_vector = self.embedding_model.embed_query(query)
+        
+        try:
+            query_vector = self.embedding_model.embed_query(query)
+        except Exception as e:
+            await thinking_callback({
+                "eventType": "research-failures",
+                "subEventType": "embedding-failure",
+                "error": str(e),
+                "details": {
+                    "query": query,
+                    "questionId": question_id
+                }
+            })
+            return [], consume_tokens
 
         # 2) Search each source
         for source in selected_collections:
-            retrieved_results = await self.vector_db.asearch_data(
-                collection=source, vector=query_vector, session_id=session_id
-            )
+            try:
+                retrieved_results = await self.vector_db.asearch_data(
+                    collection=source, vector=query_vector, session_id=session_id
+                )
+            except Exception as e:
+                await thinking_callback({
+                    "eventType": "research-failures",
+                    "subEventType": "vector-db-search-failure",
+                    "error": str(e),
+                    "details": {
+                        "query": query,
+                        "collection": source,
+                        "questionId": question_id
+                    }
+                })
+                continue
+                
             if not retrieved_results:
                 log.color_print(f"😕 No snippets found in {source}.\n")
                 continue
@@ -161,35 +209,39 @@ class DeepSearch(RAGAgent):
                     snippet += "..."
 
                 async def rerank_snippet(retrieved_result=result, snippet=snippet):
-                    chat_response = await self.llm.achat(
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": RERANK_PROMPT.format(
-                                    query=[query] + sub_queries,
-                                    retrieved_chunk=f"<chunk>{retrieved_result.text}</chunk>",
-                                ),
-                            }
-                        ]
-                    )
-                    response_content = chat_response.content.strip()
-
-                    # Remove hidden reasoning if present
-                    if "<think>" in response_content and "</think>" in response_content:
-                        end_of_think = response_content.find("</think>") + len(
-                            "</think>"
+                    try:
+                        chat_response = await self.llm.achat(
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": RERANK_PROMPT.format(
+                                        query=[query] + sub_queries,
+                                        retrieved_chunk=f"<chunk>{retrieved_result.text}</chunk>",
+                                    ),
+                                }
+                            ]
                         )
-                        response_content = response_content[end_of_think:].strip()
+                        response_content = chat_response.content.strip()
 
-                    return (
-                        retrieved_result,
-                        response_content,
-                        chat_response.total_tokens,
-                    )
+                        # Remove hidden reasoning if present
+                        if "<think>" in response_content and "</think>" in response_content:
+                            end_of_think = response_content.find("</think>") + len(
+                                "</think>"
+                            )
+                            response_content = response_content[end_of_think:].strip()
+
+                        return (
+                            retrieved_result,
+                            response_content,
+                            chat_response.total_tokens,
+                        )
+                    except Exception as e:
+                        # Return a conservative evaluation on reranking failure
+                        return (retrieved_result, "MAYBE", 0)
 
                 tasks_rerank.append(rerank_snippet())
 
-            rerank_outcomes = await asyncio.gather(*tasks_rerank)
+            rerank_outcomes = await asyncio.gather(*tasks_rerank, return_exceptions=True)
 
             chunk_eval_event = {
                 "eventType": "chunk-evaluation",
@@ -200,7 +252,14 @@ class DeepSearch(RAGAgent):
 
             accepted_count = 0
             references = set()
-            for retrieved_result, response_content, used_tokens in rerank_outcomes:
+            rerank_failures = 0
+            
+            for outcome in rerank_outcomes:
+                if isinstance(outcome, Exception):
+                    rerank_failures += 1
+                    continue
+                    
+                retrieved_result, response_content, used_tokens = outcome
                 consume_tokens += used_tokens
                 filename = os.path.basename(retrieved_result.reference)
 
@@ -218,6 +277,21 @@ class DeepSearch(RAGAgent):
                     all_retrieved_results.append(retrieved_result)
                     accepted_count += 1
                     references.add(retrieved_result.reference)
+
+            # Report reranking failures if any
+            if rerank_failures > 0:
+                await thinking_callback({
+                    "eventType": "research-failures",
+                    "subEventType": "reranking-partial-failure",
+                    "error": f"Failed to rerank {rerank_failures} chunks",
+                    "details": {
+                        "query": query,
+                        "collection": source,
+                        "questionId": question_id,
+                        "failedCount": rerank_failures,
+                        "totalCount": len(retrieved_results)
+                    }
+                })
 
             # Emit chunk-evaluation event
             await thinking_callback(chunk_eval_event)
@@ -245,6 +319,7 @@ class DeepSearch(RAGAgent):
         original_query: str,
         all_sub_queries: List[str],
         all_chunks: List[RetrievalResult],
+        thinking_callback=None,
     ) -> Tuple[str, List[str], int]:
         """Reflect to see if additional queries are needed to fill knowledge gaps.
         Returns (reason, questions, tokens_used).
@@ -261,11 +336,25 @@ class DeepSearch(RAGAgent):
             mini_questions=all_sub_queries,
             mini_chunk_str=mini_chunk_str,
         )
-        chat_response = self.llm.chat(
-            [{"role": "user", "content": reflect_prompt}], json_mode=True
-        )
-        response_content = chat_response.content
-        tokens_used = chat_response.total_tokens
+        
+        try:
+            chat_response = self.llm.chat(
+                [{"role": "user", "content": reflect_prompt}], json_mode=True
+            )
+            response_content = chat_response.content
+            tokens_used = chat_response.total_tokens
+        except Exception as e:
+            if thinking_callback:
+                asyncio.create_task(thinking_callback({
+                    "eventType": "research-failures",
+                    "subEventType": "reflection-llm-failure",
+                    "error": str(e),
+                    "details": {
+                        "originalQuery": original_query,
+                        "stage": "gap-query-generation"
+                    }
+                }))
+            return "Failed to generate reflection due to LLM error.", [], 0
 
         # Now parse the JSON.
         # We expect something like:
@@ -277,8 +366,18 @@ class DeepSearch(RAGAgent):
             reflect_result = json.loads(response_content)
             reason = reflect_result.get("reason", "")
             questions = reflect_result.get("questions", [])
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
             # Fallback if the model returned something else
+            if thinking_callback:
+                asyncio.create_task(thinking_callback({
+                    "eventType": "research-failures",
+                    "subEventType": "json-parsing-failure",
+                    "error": str(e),
+                    "details": {
+                        "stage": "gap-query-generation",
+                        "response": response_content[:200] + "..." if len(response_content) > 200 else response_content
+                    }
+                }))
             reason = "Could not parse reflection JSON."
             questions = []
 
@@ -292,6 +391,7 @@ class DeepSearch(RAGAgent):
         original_query: str,
         all_sub_queries: List[str],
         all_chunks: List[RetrievalResult],
+        thinking_callback=None,
     ) -> Tuple[str, int]:
         """Use SUMMARY_PROMPT to create a short final summary from all retrieved chunks."""
         if not all_chunks:
@@ -306,11 +406,24 @@ class DeepSearch(RAGAgent):
             mini_questions=all_sub_queries,
             mini_chunk_str=chunk_str,
         )
-        chat_response = self.llm.chat([{"role": "user", "content": prompt_text}])
-        summary_text = chat_response.content
-        tokens_used = chat_response.total_tokens
-
-        return summary_text, tokens_used
+        
+        try:
+            chat_response = self.llm.chat([{"role": "user", "content": prompt_text}])
+            summary_text = chat_response.content
+            tokens_used = chat_response.total_tokens
+            return summary_text, tokens_used
+        except Exception as e:
+            if thinking_callback:
+                asyncio.create_task(thinking_callback({
+                    "eventType": "research-failures",
+                    "subEventType": "summary-generation-failure",
+                    "error": str(e),
+                    "details": {
+                        "originalQuery": original_query,
+                        "chunkCount": len(all_chunks)
+                    }
+                }))
+            return f"Failed to generate summary due to error: {str(e)}", 0
 
     def retrieve(
         self, original_query: str, **kwargs
@@ -335,9 +448,21 @@ class DeepSearch(RAGAgent):
         all_sub_queries = []
         total_tokens = 0
 
-        # 1) Generate sub-queries
-        sub_queries, used_token = self._generate_sub_queries(original_query)
-        total_tokens += used_token
+        try:
+            # 1) Generate sub-queries
+            sub_queries, used_token = self._generate_sub_queries(original_query)
+            total_tokens += used_token
+        except Exception as e:
+            await thinking_callback({
+                "eventType": "research-failures",
+                "subEventType": "sub-query-generation-failure",
+                "error": str(e),
+                "details": {
+                    "originalQuery": original_query
+                }
+            })
+            # Use original query as fallback
+            sub_queries = [original_query]
 
         # Let caller know which sub-questions we ended up with
         await thinking_callback(
@@ -350,7 +475,7 @@ class DeepSearch(RAGAgent):
         if not sub_queries:
             # No sub-queries means we can produce a final answer right away
             # But let's say no relevant info
-            thinking_callback(
+            await thinking_callback(
                 {
                     "eventType": "final-answer",
                     "answer": f"No sub-queries needed. Possibly no relevant info for '{original_query}'",
@@ -378,16 +503,41 @@ class DeepSearch(RAGAgent):
                         sub_gap_queries,
                         thinking_callback,
                         question_id=qid,
-                        session_id=kwargs["file_index_session_id"],
+                        session_id=kwargs.get("file_index_session_id"),
                     )
                 )
 
             # Wait for all parallel searches
-            search_results = await asyncio.gather(*search_tasks)
+            try:
+                search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+            except Exception as e:
+                await thinking_callback({
+                    "eventType": "research-failures",
+                    "subEventType": "parallel-search-failure",
+                    "error": str(e),
+                    "details": {
+                        "iteration": iteration + 1,
+                        "queries": sub_gap_queries
+                    }
+                })
+                break
 
             # Merge all results
             search_res_from_vectordb = []
-            for res, consumed_token in search_results:
+            for idx, result in enumerate(search_results):
+                if isinstance(result, Exception):
+                    await thinking_callback({
+                        "eventType": "research-failures",
+                        "subEventType": "individual-search-failure",
+                        "error": str(result),
+                        "details": {
+                            "iteration": iteration + 1,
+                            "query": sub_gap_queries[idx] if idx < len(sub_gap_queries) else "unknown"
+                        }
+                    })
+                    continue
+                
+                res, consumed_token = result
                 total_tokens += consumed_token
                 search_res_from_vectordb.extend(res)
 
@@ -402,17 +552,30 @@ class DeepSearch(RAGAgent):
                 # We'll just break and finalize
                 break
 
-            reason, new_questions, consumed_token = self._generate_gap_queries(
-                original_query, all_sub_queries, all_search_res
-            )
-            total_tokens += consumed_token
+            try:
+                reason, new_questions, consumed_token = self._generate_gap_queries(
+                    original_query, all_sub_queries, all_search_res, thinking_callback
+                )
+                total_tokens += consumed_token
+            except Exception as e:
+                await thinking_callback({
+                    "eventType": "research-failures",
+                    "subEventType": "gap-query-generation-failure",
+                    "error": str(e),
+                    "details": {
+                        "iteration": iteration + 1,
+                        "originalQuery": original_query
+                    }
+                })
+                # Stop iterations on gap query failure
+                break
 
             # If new_questions is not empty => we have another iteration
             if new_questions:
                 await thinking_callback(
                     {
                         "eventType": "reflection",
-                        "step": 2,
+                        "step": iteration + 1,
                         "reflection": reason or "Additional search needed.",
                     }
                 )
@@ -430,7 +593,7 @@ class DeepSearch(RAGAgent):
                 await thinking_callback(
                     {
                         "eventType": "reflection",
-                        "step": iteration,
+                        "step": iteration + 1,
                         "reflection": reason or "No further queries needed.",
                     }
                 )
@@ -438,10 +601,22 @@ class DeepSearch(RAGAgent):
 
         # If we exit the loop, let's produce a final answer event:
         # 4) Produce final summary
-        summary_text, sum_tokens = self._generate_summary(
-            original_query, all_sub_queries, all_search_res
-        )
-        total_tokens += sum_tokens
+        try:
+            summary_text, sum_tokens = self._generate_summary(
+                original_query, all_sub_queries, all_search_res, thinking_callback
+            )
+            total_tokens += sum_tokens
+        except Exception as e:
+            await thinking_callback({
+                "eventType": "research-failures",
+                "subEventType": "final-summary-failure",
+                "error": str(e),
+                "details": {
+                    "originalQuery": original_query,
+                    "totalChunks": len(all_search_res)
+                }
+            })
+            summary_text = f"Failed to generate final summary: {str(e)}"
 
         # Format relevant chunks to the requested final structure
         relevant_chunks_data = []
@@ -466,9 +641,27 @@ class DeepSearch(RAGAgent):
         1) Retrieves relevant chunks for 'query'.
         2) Summarizes them and returns final answer + retrieval results.
         """
-        all_retrieved_results, n_token_retrieval, additional_info = self.retrieve(
-            query, **kwargs
-        )
+        try:
+            all_retrieved_results, n_token_retrieval, additional_info = self.retrieve(
+                query, **kwargs
+            )
+        except Exception as e:
+            thinking_callback = kwargs.get("thinking_callback", lambda x: None)
+            asyncio.create_task(thinking_callback({
+                "eventType": "research-failures",
+                "subEventType": "retrieve-orchestration-failure",
+                "error": str(e),
+                "details": {
+                    "query": query,
+                    "method": "query"
+                }
+            }))
+            return (
+                f"Failed to retrieve information due to error: {str(e)}",
+                [],
+                0,
+            )
+            
         if not all_retrieved_results:
             return (
                 f"No relevant information found for query '{query}'.",
