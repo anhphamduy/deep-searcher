@@ -156,10 +156,8 @@ class Milvus(BaseVectorDB):
                 "limit": top_k,
                 "output_fields": ["text", "source"],
                 "timeout": 10,
+                "filter": f'session_id == "{session_id}"' if session_id else None
             }
-            
-            if session_id:
-                search_params["expr"] = f'metadata["session_id"] == "{session_id}"'
             
             search_results = await self.async_client.search(**search_params)
 
