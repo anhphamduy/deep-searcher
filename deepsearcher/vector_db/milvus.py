@@ -142,6 +142,7 @@ class Milvus(BaseVectorDB):
         collection: Optional[str],
         vector: Union[np.array, List[float]],
         top_k: int = 12,
+        session_id: Optional[str] = None,
         *args,
         **kwargs,
     ) -> List[RetrievalResult]:
@@ -149,13 +150,18 @@ class Milvus(BaseVectorDB):
         if not collection:
             collection = self.default_collection
         try:
-            search_results = await self.async_client.search(
-                collection_name=collection,
-                data=[vector],
-                limit=top_k,
-                output_fields=["text", "source"],
-                timeout=10,
-            )
+            search_params = {
+                "collection_name": collection,
+                "data": [vector],
+                "limit": top_k,
+                "output_fields": ["text", "source"],
+                "timeout": 10,
+            }
+            
+            if session_id:
+                search_params["expr"] = f'metadata["session_id"] == "{session_id}"'
+            
+            search_results = await self.async_client.search(**search_params)
 
             return [
                 RetrievalResult(
