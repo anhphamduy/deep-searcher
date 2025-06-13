@@ -68,8 +68,8 @@ Related Chunks:
 {mini_chunk_str}
 """
 
-SUMMARY_PROMPT = """You are an AI content analysis expert. Please write a concise summary of all relevant chunks below. 
-Preserve key facts, references, or citations if present. Output plain text.
+SUMMARY_PROMPT = """You are an AI content analysis expert. Please write a detailed summary of all relevant information to the original query and questions. 
+Preserve key facts, references, or citations if present. Output in a structured format with each details being in a table or dot points or etc, as long as they are easy to be read.
 
 Original Query:
 {question}
