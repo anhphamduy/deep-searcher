@@ -48,6 +48,7 @@ class AzureOpenAI(BaseLLM):
         return ChatResponse(
             content=completion.choices[0].message.content,
             total_tokens=completion.usage.total_tokens,
+            usage_metadata=completion.usage,
         )
 
     async def achat(self, messages: List[Dict], json_mode=False) -> ChatResponse:

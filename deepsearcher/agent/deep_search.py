@@ -7,7 +7,6 @@ from deepsearcher.agent.base import RAGAgent, describe_class
 from deepsearcher.agent.collection_router import CollectionRouter
 from deepsearcher.embedding.base import BaseEmbedding
 from deepsearcher.llm.base import BaseLLM
-from deepsearcher.tools import log
 from deepsearcher.vector_db import RetrievalResult
 from deepsearcher.vector_db.base import BaseVectorDB, deduplicate_results
 
@@ -120,10 +119,9 @@ class DeepSearch(RAGAgent):
             )
             response_content = chat_response.content
             sub_queries = self.llm.literal_eval(response_content)
-            return sub_queries, chat_response.total_tokens
+            return sub_queries, chat_response.total_tokens, chat_response.usage_metadata
         except Exception as e:
             # If we can't generate sub-queries, return the original query as fallback
-            log.color_print(f"⚠️ Failed to generate sub-queries: {str(e)}\n")
             return [original_query], 0
 
     async def _search_chunks_from_vectordb(
@@ -198,7 +196,6 @@ class DeepSearch(RAGAgent):
                 continue
                 
             if not retrieved_results:
-                log.color_print(f"😕 No snippets found in {source}.\n")
                 continue
 
             # 3) Rerank each snippet concurrently
@@ -222,6 +219,7 @@ class DeepSearch(RAGAgent):
                             ]
                         )
                         response_content = chat_response.content.strip()
+                        usage_metadata = chat_response.usage_metadata
 
                         # Remove hidden reasoning if present
                         if "<think>" in response_content and "</think>" in response_content:
@@ -234,10 +232,11 @@ class DeepSearch(RAGAgent):
                             retrieved_result,
                             response_content,
                             chat_response.total_tokens,
+                            usage_metadata
                         )
                     except Exception as e:
                         # Return a conservative evaluation on reranking failure
-                        return (retrieved_result, "MAYBE", 0)
+                        return (retrieved_result, "MAYBE", 0, {})
 
                 tasks_rerank.append(rerank_snippet())
 
@@ -248,6 +247,7 @@ class DeepSearch(RAGAgent):
                 "questionId": question_id,
                 "question": query,
                 "chunks": [],
+                "usage_metadatas": []
             }
 
             accepted_count = 0
@@ -259,9 +259,11 @@ class DeepSearch(RAGAgent):
                     rerank_failures += 1
                     continue
                     
-                retrieved_result, response_content, used_tokens = outcome
+                retrieved_result, response_content, used_tokens, usage_metadata = outcome
                 consume_tokens += used_tokens
                 filename = os.path.basename(retrieved_result.reference)
+
+                chunk_eval_event["usage_metadatas"].append(usage_metadata)
 
                 # If it says "YES" or "MAYBE", accept the snippet
                 if (
@@ -306,8 +308,6 @@ class DeepSearch(RAGAgent):
                     f'✔️ Found {accepted_count} helpful snippet(s) for "{query}".\n'
                     f"Relevant files: {references_text}"
                 )
-            else:
-                log.color_print("🙁 None of these snippets seemed helpful.\n")
 
         return all_retrieved_results, consume_tokens
 
@@ -342,6 +342,7 @@ class DeepSearch(RAGAgent):
                 [{"role": "user", "content": reflect_prompt}], json_mode=True
             )
             response_content = chat_response.content
+            usage_metadata = chat_response.usage_metadata
             tokens_used = chat_response.total_tokens
         except Exception as e:
             if thinking_callback:
@@ -381,7 +382,7 @@ class DeepSearch(RAGAgent):
             reason = "Could not parse reflection JSON."
             questions = []
 
-        return reason, questions, tokens_used
+        return reason, questions, tokens_used, usage_metadata
 
     ########################################################################
     # Additional helper to produce final chunk summary with SUMMARY_PROMPT
@@ -395,7 +396,7 @@ class DeepSearch(RAGAgent):
     ) -> Tuple[str, int]:
         """Use SUMMARY_PROMPT to create a short final summary from all retrieved chunks."""
         if not all_chunks:
-            return "No relevant information found.", 0
+            return "No relevant information found.", 0, {}
 
         # Format chunk strings
         chunk_texts = [chunk.text for chunk in all_chunks]
@@ -411,7 +412,8 @@ class DeepSearch(RAGAgent):
             chat_response = self.llm.chat([{"role": "user", "content": prompt_text}])
             summary_text = chat_response.content
             tokens_used = chat_response.total_tokens
-            return summary_text, tokens_used
+            usage_metadata = chat_response.usage_metadata
+            return summary_text, tokens_used, usage_metadata
         except Exception as e:
             if thinking_callback:
                 asyncio.create_task(thinking_callback({
@@ -442,7 +444,6 @@ class DeepSearch(RAGAgent):
         max_iter = kwargs.pop("max_iter", self.max_iter)
         thinking_callback = kwargs.get("thinking_callback", lambda x: None)
 
-        log.color_print(f"<query> {original_query} </query>\n")
 
         all_search_res = []
         all_sub_queries = []
@@ -450,7 +451,7 @@ class DeepSearch(RAGAgent):
 
         try:
             # 1) Generate sub-queries
-            sub_queries, used_token = self._generate_sub_queries(original_query)
+            sub_queries, used_token, sub_queries_usage_metadata = self._generate_sub_queries(original_query)
             total_tokens += used_token
         except Exception as e:
             await thinking_callback({
@@ -469,17 +470,17 @@ class DeepSearch(RAGAgent):
             {
                 "eventType": "questions-generated",
                 "questions": sub_queries,
+                "usage_metadata": sub_queries_usage_metadata
             }
         )
 
         if not sub_queries:
-            # No sub-queries means we can produce a final answer right away
-            # But let's say no relevant info
             await thinking_callback(
                 {
                     "eventType": "final-answer",
                     "answer": f"No sub-queries needed. Possibly no relevant info for '{original_query}'",
                     "relevant_chunks": [],
+                    "usage_metadata": sub_queries_usage_metadata
                 }
             )
             return [], total_tokens, {}
@@ -489,7 +490,6 @@ class DeepSearch(RAGAgent):
         # 2) Iterative retrieval
         question_counter = 1
         for iteration in range(max_iter):
-            log.color_print(f">> Iteration: {iteration + 1}\n")
             sub_gap_queries = sub_queries
 
             # We'll search each sub-gap query in parallel
@@ -548,12 +548,11 @@ class DeepSearch(RAGAgent):
 
             # 3) Reflection for gap queries
             if iteration == max_iter - 1:
-                log.color_print("<think> Exceeded max iterations. </think>\n")
                 # We'll just break and finalize
                 break
 
             try:
-                reason, new_questions, consumed_token = self._generate_gap_queries(
+                reason, new_questions, consumed_token, gap_queries_usage_metadata = self._generate_gap_queries(
                     original_query, all_sub_queries, all_search_res, thinking_callback
                 )
                 total_tokens += consumed_token
@@ -583,6 +582,7 @@ class DeepSearch(RAGAgent):
                     {
                         "eventType": "questions-generated",
                         "questions": new_questions,
+                        "usage_metadata": gap_queries_usage_metadata
                     }
                 )
 
@@ -595,6 +595,7 @@ class DeepSearch(RAGAgent):
                         "eventType": "reflection",
                         "step": iteration + 1,
                         "reflection": reason or "No further queries needed.",
+                        "usage_metadata": gap_queries_usage_metadata
                     }
                 )
                 break
@@ -602,7 +603,7 @@ class DeepSearch(RAGAgent):
         # If we exit the loop, let's produce a final answer event:
         # 4) Produce final summary
         try:
-            summary_text, sum_tokens = self._generate_summary(
+            summary_text, sum_tokens, summary_usage_metadata = self._generate_summary(
                 original_query, all_sub_queries, all_search_res, thinking_callback
             )
             total_tokens += sum_tokens
@@ -630,6 +631,7 @@ class DeepSearch(RAGAgent):
                 "eventType": "final-answer",
                 "answer": summary_text,
                 "relevant_chunks": relevant_chunks_data,
+                "usage_metadata": summary_usage_metadata
             }
         )
 

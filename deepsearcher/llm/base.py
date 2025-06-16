@@ -5,9 +5,10 @@ from typing import Dict, List
 
 
 class ChatResponse(ABC):
-    def __init__(self, content: str, total_tokens: int) -> None:
+    def __init__(self, content: str, total_tokens: int, usage_metadata=None) -> None:
         self.content = content
         self.total_tokens = total_tokens
+        self.usage_metadata = usage_metadata
 
     def __repr__(self) -> str:
         return f"ChatResponse(content={self.content}, total_tokens={self.total_tokens})"
